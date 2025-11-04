@@ -1,0 +1,1 @@
+function predizione = Predizione_LSTM(rete, dati)

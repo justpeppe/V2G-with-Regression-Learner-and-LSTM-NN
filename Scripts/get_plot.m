@@ -12,14 +12,20 @@ function figure_out = get_plot(Ypred_norm, Ynorm, params, target, time_vector)
     % De-normalizzazione
     Y_real = Ynorm .* params.(target).dev_std + params.(target).media;
     Y_pred = Ypred_norm .* params.(target).dev_std + params.(target).media;
+    
+    % Allinea il vettore temporale all'input (shiftato di un passo indietro)
+    time_vector_input = time_vector(1:end-1);
 
-    % Plot confronto dati reali vs predetti con time_vector sull'asse x
+    % Taglia le serie di una posizione per allinearle
+    Y_real_aligned = Y_real(1:end-1);
+    Y_pred_aligned = Y_pred(2:end);
+
     figure_out = figure;
-    plot(time_vector, Y_real, 'k-', 'LineWidth', 1); % nero linea continua
+    plot(time_vector_input, Y_real_aligned, 'k-', 'LineWidth', 1);
     hold on;
-    plot(time_vector, Y_pred, 'r--', 'LineWidth', 1); % rosso linea tratteggiata
+    plot(time_vector_input, Y_pred_aligned, 'r--', 'LineWidth', 1);
     legend('Dati Reali', 'Dati Predetti');
-    title('Confronto Predizione vs Reali de-normalizzati');
+    title('Confronto Predizione vs Reali de-normalizzati (Allineato)');
     xlabel('Tempo');
     ylabel('Energia (kWh)');
     grid on;
