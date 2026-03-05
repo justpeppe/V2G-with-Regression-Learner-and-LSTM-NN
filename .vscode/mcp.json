@@ -4,7 +4,7 @@
 			"type": "stdio",
 			"command": "C:\\Users\\user\\go\\bin\\matlab-mcp-core-server.exe",
 			"args": [
-				"--matlab-root=C:\\Program Files\\MATLAB\\R2025b",
+				"--matlab-root=C:\\Users\\user\\OneDrive - unime.it\\Appunti Università\\Appunti condivisi\\00) Tirocinio\\Trimarchi\\V2G-with-Regression-Learner-and-LSTM-NN",
 				"--initialize-matlab-on-startup=true",
 				"--initial-working-folder=C:\\Users\\user\\Documents\\Tesi",
 				"--disable-telemetry=true"
