@@ -54,16 +54,16 @@ timeVectorOut = NaT(estimatedRows, 1);
 idxRowOut = 1;
 
 % Generate descriptive column names for the lagged features (e.g., temp_t_1)
-columnNames = cell(1, numColumns + 1);
+% Use a string array to avoid mixed-type cell arrays that break array2table.
+featureNames = strings(numPredictors * regressors, 1);
 colIdx = 1;
 for lag = regressors:-1:1
     for idxPred = 1:numPredictors
-        columnNames{colIdx} = sprintf("%s_t_%d", predictorNames{idxPred}, lag);
+        featureNames(colIdx) = sprintf("%s_t_%d", predictorNames{idxPred}, lag);
         colIdx = colIdx + 1;
     end
 end
-columnNames{colIdx} = targetName;
-columnNames{end} = "time_vector";
+allVarNames = [featureNames; string(targetName)]; % (numColumns × 1) string array
 
 % Process only valid consecutive days to ensure data continuity
 for idxDay = find(validConsecutiveDays)'
@@ -107,7 +107,7 @@ dataMatrix = dataMatrix(1:idxRowOut-1, :);
 timeVectorOut = timeVectorOut(1:idxRowOut-1);
 
 % Convert back to a table and attach the timestamps
-dataWithRegressors = array2table(dataMatrix, "VariableNames", columnNames(1:end-1));
+dataWithRegressors = array2table(dataMatrix, "VariableNames", allVarNames);
 dataWithRegressors.time_vector = timeVectorOut;
 
 fprintf("Total rows created: %d\n", height(dataWithRegressors));

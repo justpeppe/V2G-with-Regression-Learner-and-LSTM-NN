@@ -27,8 +27,16 @@ indicators.RSquared = 1 - (ssRes / ssTot);
 indicators.RMSE = sqrt(mean(errors.^2));
 indicators.MSE = mean(errors.^2);
 
-% Calculate Mean Absolute Percentage Error (MAPE) and Mean Absolute Error (MAE)
-indicators.MAPE = mean(abs(errors ./ tData)) * 100;
+% Calculate Mean Absolute Error (MAE)
 indicators.MAE = mean(abs(errors));
+
+% Calculate MAPE excluding near-zero actual values to avoid division explosion.
+% Samples below 1e-3 kWh (e.g. true nighttime zeros) are dropped from the average.
+nonZeroMask = abs(tData) > 1e-3;
+if any(nonZeroMask)
+    indicators.MAPE = mean(abs(errors(nonZeroMask) ./ tData(nonZeroMask))) * 100;
+else
+    indicators.MAPE = NaN;
+end
 
 end

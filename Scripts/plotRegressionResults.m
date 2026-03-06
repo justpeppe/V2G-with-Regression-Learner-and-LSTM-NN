@@ -16,11 +16,10 @@ end
 yPredDenorm = (yPredNorm * params.(target).std) + params.(target).mean;
 yRealDenorm = (yNorm * params.(target).std) + params.(target).mean;
 
-% Shift the real and predicted arrays to align them correctly on the time axis.
-% Regression Learner predictions (t) are compared against the real target at (t)
-yRealAligned = yRealDenorm(1:end-1);
-yPredAligned = yPredDenorm(2:end);
-timeVectorInput = timeVector(1:end-1);
+% Real and predicted are compared at the same timestep (no shift needed).
+yRealAligned = yRealDenorm;
+yPredAligned = yPredDenorm;
+timeVectorInput = timeVector;
 
 % ── 1. Create a logical index array instead of time array ───────────────
 numPoints = length(yRealAligned);
