@@ -125,30 +125,32 @@ for zi = 1:numel(zoneIds)
             error("Invalid testMode: %s", testMode);
         end
 
-        contextRows = datasNorm(1:cfg.numLags, :);
-        testWithCtx = [contextRows; datasNorm(testMask, :)];
-
-        [xTest, yTest, timeVectorTest] = createLstmSequences( ...
-            testWithCtx, cfg.numLags, cfg.predictors, cfg.target);
-
-        keepTest    = ismember(dateshift(timeVectorTest, "start", "day"), testDaysToKeep);
-        xTest       = xTest(keepTest);
-        yTest       = yTest(keepTest, :);
-        timeVectorTest = timeVectorTest(keepTest);
+        testData = datasNorm(testMask, :);
+        [xTest, yTest, timeVectorTest] = createLstmSequences(testData, cfg.predictors, cfg.target);
 
         if isempty(xTest)
             error("No test sequences for zone %d.", zId);
         end
 
         %% 4. Predict (minibatchpredict)
-        yPredNorm = minibatchpredict(m.net, xTest);
+        yPredNormCell = minibatchpredict(m.net, xTest, UniformOutput=false, SequencePaddingDirection="left");
+
+        % Remove padding from prediction corresponding to original test sequences
+        for n = 1:numel(yPredNormCell)
+            seqLen = size(yTest{n}, 1);
+            yPredNormCell{n} = yPredNormCell{n}(end-seqLen+1:end, :);
+        end
+
+        yPredNorm = cell2mat(yPredNormCell);
+        yTestMat  = cell2mat(yTest);
+        timeVectorTestMat = vertcat(timeVectorTest{:});
 
         targetField = matlab.lang.makeValidName(char(cfg.target));
         mu  = normPs.(targetField).mean;
         sg  = normPs.(targetField).std;
 
         yPredReal = double(yPredNorm) .* sg + mu;
-        yTestReal = double(yTest)     .* sg + mu;
+        yTestReal = double(yTestMat)     .* sg + mu;
 
         %% 5. Metrics
         errors  = yTestReal - yPredReal;
@@ -211,7 +213,7 @@ for zi = 1:numel(zoneIds)
         end
 
         % Hour breakdown
-        orario        = hour(timeVectorTest);
+        orario        = hour(timeVectorTestMat);
         erroreAssoluto = abs(errors);
         errorePerOra  = zeros(24, 1);
         for h = 0:23
@@ -257,7 +259,7 @@ for zi = 1:numel(zoneIds)
         figTitle = sprintf("Zone %d — Residuals Over Time", zId);
         figure("Name", figTitle, "NumberTitle", "off", "Position", [590 500 700 320]);
 
-        scatter(timeVectorTest, errors, 18, [0.2 0.5 0.9], "filled", ...
+        scatter(timeVectorTestMat, errors, 18, [0.2 0.5 0.9], "filled", ...
             MarkerFaceAlpha=0.75);
         yline(0, "--k", LineWidth=1);
         xlabel("Date", FontSize=11);
@@ -291,7 +293,7 @@ for zi = 1:numel(zoneIds)
         grid on; grid minor;
 
         %% 11. Figure D — Time Series Comparison (Superimposed Days)
-        figD = plotResults(yPredNorm, double(yTest), normPs, cfg.target, timeVectorTest);
+        figD = plotResults(yPredNorm, double(yTestMat), normPs, cfg.target, timeVectorTestMat);
         set(figD, "Name", sprintf("Zone %d — Time Series Comparison", zId), ...
             "NumberTitle", "off", "Position", [590 80 800 350]);
         % Override the title inside plotResults to clarify it's for this specific zone

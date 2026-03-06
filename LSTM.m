@@ -45,8 +45,8 @@ clear
 root = fileparts(mfilename('fullpath'));
 addpath(root + "\Scripts");
 
-zoneId=8; % Zona 1016
-%zoneId=9; %Zona 214 Trieste
+%zoneId=8; % Zona 1016
+zoneId=9; %Zona 214 Trieste
 %zoneId=10; % Zona 2004
 %zoneId=11; % Zona 2002
 %zoneId=12; %Torvergata
@@ -55,12 +55,11 @@ datas = loadZoneData(root, zoneId);
 
 %% Constants
 
-numLags = 48;
+numLags = 48; % Retained only for potential config reference, no longer dictates sliding windows.
+useBayesianOptimization = false; % Set to true to automatically search for optimal hyperparameters
 
 % Predictors: weather, holidays, time (sine/cosine for cyclicity)
-% and AAC_energy (consumption history). The network has access to y(t-1)...y(t-48),
-% but with 48 steps of weather/time context it is incentivized to learn
-% real patterns beyond simple persistence.
+% and AAC_energy (consumption history).
 predictors = ["AAC_energy", "precipprob", "temp", "windspeed", "holiday_indicator", ...
     "hour_sin", "hour_cos", "day_sin", "day_cos"];
 target = "AAC_energy";
@@ -84,35 +83,22 @@ datas.day_cos  = cos(2 * pi * day(datas.time_vector, 'dayofweek') / 7);
 
 [trainingNorm, testNorm, normParams] = normalizeZScore(training, test, columnsToNormalize);
 
-% Prepend the last 'numLags' rows from the training set to validation and test sets.
-% This provides the necessary historical context so the LSTM can make predictions
-% starting from the very first time step of the validation and test datasets.
-trainContextRows = trainingNorm(end - numLags + 1:end, :);
-
 [~, validationNorm, ~] = normalizeZScore(training, validation, columnsToNormalize);
-validationWithCtx = [trainContextRows; validationNorm];
-testWithCtx       = [trainContextRows; testNorm];
 
-[xTrain,      yTrain,      timeVectorTrain]      = createLstmSequences(trainingNorm,    numLags, predictors, target);
-[xTest,       yTest,       timeVectorTest]        = createLstmSequences(testWithCtx,      numLags, predictors, target);
-[xValidation, yValidation, timeVectorValidation]  = createLstmSequences(validationWithCtx, numLags, predictors, target);
-
-% Keep only samples that belong to the actual validation/test days (discard the context rows)
-testDaysNorm = dateshift(testDays, "start", "day");
-validationDaysNorm = dateshift(validationDays, "start", "day");
-keepTest = ismember(dateshift(timeVectorTest, "start", "day"), testDaysNorm);
-keepVal  = ismember(dateshift(timeVectorValidation, "start", "day"), validationDaysNorm);
-xTest = xTest(keepTest); yTest = yTest(keepTest, :); timeVectorTest = timeVectorTest(keepTest);
-xValidation = xValidation(keepVal); yValidation = yValidation(keepVal, :); timeVectorValidation = timeVectorValidation(keepVal);
+[xTrain,      yTrain,      timeVectorTrain]       = createLstmSequences(trainingNorm,    predictors, target);
+[xTest,       yTest,       timeVectorTest]        = createLstmSequences(testNorm,        predictors, target);
+[xValidation, yValidation, timeVectorValidation]  = createLstmSequences(validationNorm,  predictors, target);
 
 %% Sequence Diagnostics
 
 fprintf("\n--- Sequence Diagnostics ---\n");
 fprintf("xTrain:      %4d sequences | shape: [%d x %d]\n", numel(xTrain),      size(xTrain{1},1),      size(xTrain{1},2));
-fprintf("xValidation: %4d sequences | shape: [%d x %d]\n", numel(xValidation),  size(xValidation{1},1), size(xValidation{1},2));
-fprintf("xTest:       %4d sequences | shape: [%d x %d]\n", numel(xTest),        size(xTest{1},1),       size(xTest{1},2));
-fprintf("yTrain:      [%d x %d]  |  yValidation: [%d x %d]  |  yTest: [%d x %d]\n", ...
-    size(yTrain,1), size(yTrain,2), size(yValidation,1), size(yValidation,2), size(yTest,1), size(yTest,2));
+if ~isempty(xValidation)
+    fprintf("xValidation: %4d sequences | shape: [%d x %d]\n", numel(xValidation),  size(xValidation{1},1), size(xValidation{1},2));
+end
+if ~isempty(xTest)
+    fprintf("xTest:       %4d sequences | shape: [%d x %d]\n", numel(xTest),        size(xTest{1},1),       size(xTest{1},2));
+end
 if isempty(xValidation)
     error("LSTM:emptyValidation", "xValidation is empty after filtering — check validationDays or context buffer.");
 end
@@ -126,55 +112,107 @@ fprintf("----------------------------\n\n");
 
 numFeatures = size(xTrain{1}, 2);
 fprintf("numFeatures:   %d\n", numFeatures);
-numResponses = size(yTrain, 2);
+numResponses = size(yTrain{1}, 2);
 
-numHiddenUnits = 128;
-drop = 0.2;
-mb = 64;
-valFreq = max(1, ceil(numel(xTrain) / mb));
+if useBayesianOptimization
+    fprintf("\n=== Starting Bayesian Optimization ===\n");
+    fprintf("This process will test multiple configurations to find the optimal hyperparameters.\n");
 
-% --- LSTM Network Architecture ---
-% 1. sequenceInputLayer  -> receives sequences [numLags × numFeatures]
-% 2. lstmLayer           -> learns temporal dependencies, outputMode="last" returns
-%                           only the final state (many-to-one regression)
-% 3. dropoutLayer        -> randomly drops 20% of neurons to avoid overfitting
-% 4. fullyConnectedLayer -> intermediate dense layer to compose LSTM features
-% 5. reluLayer           -> non-linear activation (clips negative values)
-% 6. fullyConnectedLayer -> output layer: produces the single predicted value
-layers = [
-    sequenceInputLayer(numFeatures, Normalization="none")
-    lstmLayer(numHiddenUnits, OutputMode="last")
+    % Define the hyperparameter search space
+    optimVars = [
+        optimizableVariable('numHiddenUnits',   [50, 300],  'Type', 'integer')
+        optimizableVariable('numLayers',        [1, 3],     'Type', 'integer')
+        optimizableVariable('initialLearnRate', [1e-4, 1e-2], 'Transform', 'log')
+        % --- Aggiunte consigliate ---
+        optimizableVariable('dropoutRate',      [0.0, 0.5])
+        optimizableVariable('miniBatchSize',    [16, 128],  'Type', 'integer')
+        ];
+
+
+    % The objective function needs access to the training and validation data
+    % Since objective functions in bayesopt must accept a single argument (the hyperparameters),
+    % we use an anonymous function to pass the data along.
+    objFcn = @(params) lstmObjectiveFunction(params, xTrain, yTrain, xValidation, yValidation, numFeatures, numResponses);
+
+    % Run optimization
+    bayesResults = bayesopt(objFcn, optimVars, ...
+        'MaxObjectiveEvaluations', 100, ...
+        'AcquisitionFunctionName', 'expected-improvement-plus', ...
+        'UseParallel', false);
+
+
+    % Extract best parameters
+    bestParams = bayesResults.XAtMinObjective;
+    numHiddenUnits = bestParams.numHiddenUnits;
+    numLayers = bestParams.numLayers;
+    initialLearnRate = bestParams.initialLearnRate;
+    drop = bestParams.dropoutRate;
+    mb = bestParams.miniBatchSize;
+    valFreq = max(1, floor(numel(xTrain) / mb)); % ~1 validation per epoch
+
+    fprintf("\n=== Bayesian Optimization Complete ===\n");
+    fprintf("Top 3 Configurations Evaluated:\n");
+
+    resultsTable = bayesResults.XTrace;
+    resultsTable.Objective = bayesResults.ObjectiveTrace;
+    sortedResults = sortrows(resultsTable, 'Objective');
+    head(sortedResults, 3)
+
+    fprintf("\nOptimal Parameters Found:\n");
+    fprintf("  Hidden Units      : %d\n", numHiddenUnits);
+    fprintf("  LSTM Layers       : %d\n", numLayers);
+    fprintf("  Initial Learn Rate: %.5f\n", initialLearnRate);
+    fprintf("  Dropout Rate      : %.2f\n", drop);
+    fprintf("  Mini Batch Size   : %d\n", mb);
+    fprintf("  Validation Freq   : %d\n", valFreq);
+
+
+
+else
+    fprintf("\nUsing default manual network hyperparameters.\n");
+    % Default values from Bayesian Optimization (100 trials, Objective = 0.30188)
+    numHiddenUnits = 119;
+    numLayers = 1;
+    initialLearnRate = 0.01;
+    drop = 0.33;
+    mb = 30;
+    valFreq = max(1, floor(numel(xTrain) / mb)); % ~1 validation per epoch
+end
+
+% --- LSTM Network Architecture (MathWorks Seq2Seq pattern) ---
+% - numLayers LSTM layers, each with constant numHiddenUnits
+% - bottleneck FC(100) + ReLU + Dropout(0.5) to compress representations
+% - output FC(numResponses) for the final sequence prediction
+layers = [sequenceInputLayer(numFeatures, Normalization="none")];
+
+for i = 1:numLayers
+    layers = [layers
+        lstmLayer(numHiddenUnits, OutputMode="sequence")];
+end
+
+layers = [layers
+    fullyConnectedLayer(100)
+    reluLayer()
     dropoutLayer(drop)
-    fullyConnectedLayer(numHiddenUnits / 2)
-    reluLayer
-    dropoutLayer(drop)
-    fullyConnectedLayer(numResponses)
-    ];
+    fullyConnectedLayer(numResponses)];
 
 % --- Training Options ---
-% Adam: adaptive optimizer, excellent for LSTM networks, converges quickly.
-% Shuffle="every-epoch": shuffles sequences every epoch so the network does not
-%   memorize the seasonal order but generalizes the patterns.
-% ValidationPatience=15: stops training if validation loss does not
-%   improve for 15 consecutive evaluations (early stopping).
 options = trainingOptions("adam", ...
-    MaxEpochs=150, ...
+    MaxEpochs=200, ...
     MiniBatchSize=mb, ...
+    SequencePaddingDirection="left", ...
     Shuffle="every-epoch", ...
-    InitialLearnRate=1e-3, ...
+    InitialLearnRate=initialLearnRate, ...
     LearnRateSchedule="piecewise", ...
-    LearnRateDropFactor=0.5, ...
+    LearnRateDropFactor=0.2, ...
     LearnRateDropPeriod=50, ...
     GradientThreshold=1, ...
-    GradientThresholdMethod="l2norm", ...
-    L2Regularization=1e-4, ...
     ValidationData={xValidation, yValidation}, ...
     ValidationFrequency=valFreq, ...
-    ValidationPatience=15, ...
+    ValidationPatience=20, ...
     Metrics=["rsquared", "rmse", "mape", "mae", "mse"], ...
     Plots="training-progress", ...
-    Verbose=false, ...
-    ExecutionEnvironment="auto" ...
+    Verbose=false ...
     );
 
 [net, info] = trainnet(xTrain, yTrain, layers, "mse", options);
@@ -196,21 +234,24 @@ indicators = getBestIndicators(info);
 netStruct = struct( ...
     "zoneId",             zoneId, ...
     "net",                net, ...
+    "layers",             {layers}, ...
+    "options",            options, ...
     "indicators",         indicators, ...
     "normParams",         normParams, ...
     "xTrain",             {xTrain}, ...
-    "yTrain",             yTrain, ...
-    "timeVectorTrain",    timeVectorTrain, ...
+    "yTrain",             {yTrain}, ...
+    "timeVectorTrain",    {timeVectorTrain}, ...
     "xValidation",        {xValidation}, ...
-    "yValidation",        yValidation, ...
-    "timeVectorValidation", timeVectorValidation, ...
+    "yValidation",        {yValidation}, ...
+    "timeVectorValidation", {timeVectorValidation}, ...
     "xTest",              {xTest}, ...
-    "yTest",              yTest, ...
-    "timeVectorTest",     timeVectorTest, ...
+    "yTest",              {yTest}, ...
+    "timeVectorTest",     {timeVectorTest}, ...
     "config",             struct( ...
     "numFeatures",    numFeatures, ...
     "numResponses",   numResponses, ...
     "numHiddenUnits", numHiddenUnits, ...
+    "numLayers",      numLayers, ...
     "numLags",        numLags, ...
     "predictors",     predictors, ...
     "target",         target ...
@@ -226,17 +267,45 @@ models.(netName) = netStruct;
 
 m = models.(netName); % Shorthand alias for the current model
 
-trainingPrediction   = minibatchpredict(m.net, m.xTrain);
-validationPrediction = minibatchpredict(m.net, m.xValidation);
-testPrediction       = minibatchpredict(m.net, m.xTest);
+% Generates cell arrays for Seq2Seq, we concatenate them to use in plotting and metrics
+trainingPrediction   = minibatchpredict(m.net, m.xTrain, UniformOutput=false, SequencePaddingDirection="left");
+validationPrediction = minibatchpredict(m.net, m.xValidation, UniformOutput=false, SequencePaddingDirection="left");
+testPrediction       = minibatchpredict(m.net, m.xTest, UniformOutput=false, SequencePaddingDirection="left");
 
-trainingFig   = plotResults(trainingPrediction,   m.yTrain,      m.normParams, target, m.timeVectorTrain);
-validationFig = plotResults(validationPrediction, m.yValidation, m.normParams, target, m.timeVectorValidation);
-testFig       = plotResults(testPrediction,        m.yTest,       m.normParams, target, m.timeVectorTest);
+% Remove padding from the predictions before unrolling
+for n = 1:numel(trainingPrediction)
+    seqLen = size(m.yTrain{n}, 1);
+    trainingPrediction{n} = trainingPrediction{n}(end-seqLen+1:end, :);
+end
+for n = 1:numel(validationPrediction)
+    seqLen = size(m.yValidation{n}, 1);
+    validationPrediction{n} = validationPrediction{n}(end-seqLen+1:end, :);
+end
+for n = 1:numel(testPrediction)
+    seqLen = size(m.yTest{n}, 1);
+    testPrediction{n} = testPrediction{n}(end-seqLen+1:end, :);
+end
+
+% Unroll cells into long matrices for plotting and analysis
+trainingPrediction = cell2mat(trainingPrediction);
+validationPrediction = cell2mat(validationPrediction);
+testPrediction = cell2mat(testPrediction);
+
+yTrainMat = cell2mat(m.yTrain);
+yValidationMat = cell2mat(m.yValidation);
+yTestMat = cell2mat(m.yTest);
+
+timeVectorTrainMat = vertcat(m.timeVectorTrain{:});
+timeVectorValidationMat = vertcat(m.timeVectorValidation{:});
+timeVectorTestMat = vertcat(m.timeVectorTest{:});
+
+trainingFig   = plotResults(trainingPrediction,   yTrainMat,      m.normParams, target, timeVectorTrainMat);
+validationFig = plotResults(validationPrediction, yValidationMat, m.normParams, target, timeVectorValidationMat);
+testFig       = plotResults(testPrediction,        yTestMat,       m.normParams, target, timeVectorTestMat);
 
 %% Test Set Metrics Calculation
 % Compute RMSE, R^2, MAPE, MAE, and MSE on the denormalized test predictions (in actual kWh).
-models.(netName).indicators.Test = computeMetrics(testPrediction, yTest, normParams, char(target));
+models.(netName).indicators.Test = computeMetrics(testPrediction, yTestMat, normParams, char(target));
 
 %% Final Model Save
 % Save the complete model structure including the newly calculated test metrics.
@@ -253,7 +322,13 @@ fprintf("   Zone:               %d\n",      zoneId);
 fprintf("   Features (%d):      %s\n",      cfg.numFeatures, strjoin(cfg.predictors, ", "));
 fprintf("   Target:             %s\n",      cfg.target);
 fprintf("   Lags (window):      %d samples\n", cfg.numLags);
-fprintf("   Hidden units:       %d (L1)  +  %d (L2)\n", cfg.numHiddenUnits, cfg.numHiddenUnits/2);
+fprintf("   Layers:             %d LSTM layer(s)\n", cfg.numLayers);
+layerLabel = "";
+for li = 1:cfg.numLayers
+    layerLabel = layerLabel + sprintf("L%d: %d units  ", li, cfg.numHiddenUnits);
+end
+fprintf("   Hidden units:       %s\n", strtrim(layerLabel));
+fprintf("   Head:               FC(100) → ReLU → Dropout(%.2f) → FC(%d)\n", drop, cfg.numResponses);
 fprintf("--------------------------------------------------------\n");
 fprintf("   TRAINING METRICS (normalized, z-score)\n");
 fprintf("     R²:    %.4f\n",    ind.Training.Rsquared);
@@ -283,9 +358,9 @@ targetMu  = normParams.(char(target)).mean;
 targetStd = normParams.(char(target)).std;
 
 % Denormalize targets (convert back to real kWh scale)
-yTestReal       = yTest       .* targetStd + targetMu;
-yValidationReal = yValidation .* targetStd + targetMu;
-yTrainReal      = yTrain      .* targetStd + targetMu;
+yTestReal       = yTestMat       .* targetStd + targetMu;
+yValidationReal = yValidationMat .* targetStd + targetMu;
+yTrainReal      = yTrainMat      .* targetStd + targetMu;
 
 % Denormalize predictions
 testPredReal       = testPrediction       .* targetStd + targetMu;
@@ -312,7 +387,7 @@ tiledlayout(2, 2, TileSpacing="compact", Padding="compact");
 nexttile;
 % Using scatter instead of plot: since test days are not contiguous,
 % plot() would connect distant dates with straight lines creating visual artifacts.
-scatter(timeVectorTest, residuiTest, 20, [0.2 0.5 0.9], "filled", MarkerFaceAlpha=0.75);
+scatter(timeVectorTestMat, residuiTest, 20, [0.2 0.5 0.9], "filled", MarkerFaceAlpha=0.75);
 yline(0, "--k", LineWidth=1);
 title("Residuals Over Time (scatter)", FontSize=12);
 xlabel("Date"); ylabel("Error (kWh)");
@@ -371,7 +446,7 @@ axis equal; axis tight; grid on;
 % Identifies during which hours of the day the network makes the largest errors.
 % Error peaks at sunrise/sunset often indicate transitions that are hard to model.
 
-orarioTest    = hour(timeVectorTest);
+orarioTest    = hour(timeVectorTestMat);
 erroreAssoluto = abs(residuiTest);
 
 errorePerOra = zeros(24, 1);
@@ -426,7 +501,7 @@ fprintf("%-22s  %10s  %10s  %10s  %8s  %8s  %10s\n", ...
 
 % Find corresponding rows in the raw data for each timestamp
 for k = 1:numel(idxWorst)
-    ts  = timeVectorTest(idxWorst(k));
+    ts  = timeVectorTestMat(idxWorst(k));
     righe = (datas.time_vector == ts);
     if any(righe)
         r = find(righe, 1);
@@ -459,8 +534,61 @@ fprintf("%-15s  %8.4f  %12.2f  %12.2f\n", "LSTM", ind.Test.RSquared, ind.Test.RM
 fprintf("%-15s  %8.4f  %12.2f  %12.2f\n", "Persistence", r2Pers, rmsePers, maePers);
 fprintf("%s\n", repmat('-', 1, 52));
 
-if ind.Test.RSquared > r2Pers
-    fprintf("Result: LSTM outperforms persistence baseline.\n\n");
-else
-    fprintf("Result: LSTM does not outperform persistence baseline.\n\n");
+%% Local Functions
+
+function valError = lstmObjectiveFunction(params, xTrain, yTrain, xValidation, yValidation, numFeatures, numResponses)
+% Evaluate the network with the given hyperparameters.
+% The objective is to minimize the Validation RMSE.
+
+% Define architecture based on bayesian parameters
+numHiddenUnits = params.numHiddenUnits;
+numLayers = params.numLayers;
+
+layers = [sequenceInputLayer(numFeatures, Normalization="none")];
+for i = 1:numLayers
+    layers = [layers
+        lstmLayer(numHiddenUnits, OutputMode="sequence")];
+end
+
+layers = [layers
+    fullyConnectedLayer(100)
+    reluLayer()
+    dropoutLayer(params.dropoutRate)
+    fullyConnectedLayer(numResponses)];
+
+% Define short training options for the objective evaluation
+options = trainingOptions("adam", ...
+    MaxEpochs=50, ... % Shortened for faster evaluation during search
+    MiniBatchSize=params.miniBatchSize, ...
+    SequencePaddingDirection="left", ...
+    Shuffle="every-epoch", ...
+    InitialLearnRate=params.initialLearnRate, ...
+    LearnRateSchedule="piecewise", ...
+    LearnRateDropFactor=0.5, ...
+    LearnRateDropPeriod=25, ...
+    GradientThreshold=1, ...
+    ValidationData={xValidation, yValidation}, ...
+    ValidationFrequency=max(1, floor(numel(xTrain) / params.miniBatchSize)), ...
+    ValidationPatience=10, ...
+    Verbose=false ...
+    );
+
+% Train the network
+[net, ~] = trainnet(xTrain, yTrain, layers, "mse", options);
+
+% Calculate validation RMSE
+valPredCell = minibatchpredict(net, xValidation, UniformOutput=false, SequencePaddingDirection="left");
+
+% Unpad and compute RMSE
+errSqSum = 0;
+totalPoints = 0;
+for n = 1:numel(valPredCell)
+    seqLen = size(yValidation{n}, 1);
+    predClean = valPredCell{n}(end-seqLen+1:end, :);
+    truth = yValidation{n};
+    errSqSum = errSqSum + sum((truth - predClean).^2, 'all');
+    totalPoints = totalPoints + numel(truth);
+end
+
+valError = sqrt(errSqSum / totalPoints);
 end

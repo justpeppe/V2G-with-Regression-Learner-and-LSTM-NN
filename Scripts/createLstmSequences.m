@@ -1,16 +1,16 @@
-function [xTrain, yTrain, timeVectorLags] = createLstmSequences(tbl, numPredictors, columnsTable, target)
-% createLstmSequences Extracts sequences of predictors and targets for LSTM training.
+function [X, Y, timeVectorFrames] = createLstmSequences(tbl, predictors, target)
+% createLstmSequences Extracts contiguous sequences for Seq2Seq LSTM training.
+% It splits continuous blocks into X (1:end-1) and Y (2:end).
 arguments
     tbl table
-    numPredictors (1,1) double {mustBeInteger, mustBePositive}
-    columnsTable
+    predictors
     target
 end
 
-if ischar(columnsTable)
-    columnsTable = {columnsTable};
-elseif isstring(columnsTable)
-    columnsTable = cellstr(columnsTable);
+if ischar(predictors)
+    predictors = {predictors};
+elseif isstring(predictors)
+    predictors = cellstr(predictors);
 end
 
 if ischar(target)
@@ -23,87 +23,47 @@ if ~ismember("time_vector", tbl.Properties.VariableNames)
     error("The table must contain the time_vector variable.");
 end
 
-if ~isdatetime(tbl.time_vector)
-    error("tbl.time_vector must be a datetime array.");
-end
+% Sort by time to ensure chronological order
+tbl = sortrows(tbl, "time_vector");
 
-% Extract the unique days to ensure sequences don't cross missing data gaps
-daysArr = dateshift(tbl.time_vector, "start", "day");
-uniqueDays = sort(unique(daysArr));
-fprintf("Total days: %d\n", height(uniqueDays));
+% Find contiguous blocks based on 30-minute intervals
+timeDiffs = diff(tbl.time_vector);
+% A gap is any jump larger than the standard 30-minutes (we use 35 mins tolerance)
+gapIndices = find(timeDiffs > minutes(35));
 
-% Identify valid days that immediately follow the previous day.
-% This prevents creating sequences that span across missing weekends or holidays.
-validConsecutiveDays = false(height(uniqueDays), 1);
-for idxDay = 2:height(uniqueDays)
-    if days(uniqueDays(idxDay) - uniqueDays(idxDay - 1)) == 1
-        validConsecutiveDays(idxDay) = true;
-    end
-end
+startIdx = 1;
+breakPoints = [gapIndices; height(tbl)];
 
-numValidDays = sum(validConsecutiveDays);
-fprintf("Valid consecutive days: %d\n", numValidDays);
+XTemp = cell(numel(breakPoints), 1);
+YTemp = cell(numel(breakPoints), 1);
+timeTemp = cell(numel(breakPoints), 1);
 
-% Convert the table columns into numeric matrices for faster processing
-xMat = table2array(tbl(:, columnsTable));
+xMat = table2array(tbl(:, predictors));
 yMat = table2array(tbl(:, target));
 
-numRows = size(tbl, 1);
-numFeatures = size(xMat, 2);
-numResponses = size(yMat, 2);
+validCount = 0;
+for i = 1:numel(breakPoints)
+    endIdx = breakPoints(i);
 
-fprintf("Sequence length (numPredictors): %d\n", numPredictors);
-fprintf("Number of features: %d\n", numFeatures);
-fprintf("Number of targets: %d\n", numResponses);
+    % A sequence requires at least 2 points to create a t and t+1 pair
+    if (endIdx - startIdx) >= 1
+        validCount = validCount + 1;
 
-% Pre-allocate cell arrays and matrices with the maximum possible size for efficiency
-xTrainTemp = cell(numRows, 1);
-yTrainTemp = zeros(numRows, numResponses);
-timeTemp = NaT(numRows, 1);
-idxSequence = 1;
+        sequenceX = xMat(startIdx:endIdx-1, :);
+        sequenceY = yMat(startIdx+1:endIdx, :);
+        sequenceTime = tbl.time_vector(startIdx+1:endIdx);
 
-% Iterate through the dataset to construct rolling sequences
-for i = 1:(numRows - numPredictors)
-    tEnd = i + numPredictors - 1; % End of the predictor window
-    tTarget = tEnd + 1;           % Time step of the target to predict
-
-    % Check if all days within the current sequence window are strictly consecutive
-    sequenceDays = daysArr(i:tTarget);
-    uniqueSequenceDays = unique(sequenceDays);
-
-    isValid = true;
-    if numel(uniqueSequenceDays) > 1
-        for j = 2:numel(uniqueSequenceDays)
-            if days(uniqueSequenceDays(j) - uniqueSequenceDays(j-1)) ~= 1
-                isValid = false;
-                break;
-            end
-        end
+        XTemp{validCount} = sequenceX;
+        YTemp{validCount} = sequenceY;
+        timeTemp{validCount} = sequenceTime;
     end
 
-    % If the sequence is perfectly consecutive, save it
-    if isValid
-        xTrainTemp{idxSequence} = xMat(i:tEnd, :);  % Format: [numLags × numFeatures] (Time x Channels format for trainnet)
-        yTrainTemp(idxSequence, :) = yMat(tTarget, :);
-        timeTemp(idxSequence, 1) = tbl.time_vector(tTarget);
-        idxSequence = idxSequence + 1;
-    end
+    startIdx = endIdx + 1;
 end
 
-% Trim the pre-allocated arrays to remove unused empty rows
-lastValidIdx = idxSequence - 1;
-xTrain = xTrainTemp(1:lastValidIdx);
-yTrain = yTrainTemp(1:lastValidIdx, :);
-timeVectorLags = timeTemp(1:lastValidIdx, 1);
+X = XTemp(1:validCount);
+Y = YTemp(1:validCount);
+timeVectorFrames = timeTemp(1:validCount);
 
-fprintf("Number of sequences created: %d\n", lastValidIdx);
-if lastValidIdx > 0
-    seqShape = size(xTrain{1});
-    fprintf("  Sequence shape xTrain{1}: [%d x %d]  (expected [numLags x numFeatures] = [%d x %d])\n", ...
-        seqShape(1), seqShape(2), numPredictors, numFeatures);
-    fprintf("  yTrain shape:             [%d x %d]\n", size(yTrain, 1), size(yTrain, 2));
-else
-    warning("createLstmSequences: no valid sequences created — check data continuity and numPredictors.");
-end
-fprintf("LSTM sequence creation completed.\n");
+fprintf("Number of Seq2Seq contiguous blocks created: %d\n", validCount);
 end
