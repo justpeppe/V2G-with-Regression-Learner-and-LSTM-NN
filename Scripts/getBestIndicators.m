@@ -20,7 +20,7 @@ bestValIdx = validIndices(bestValIdxTemp);
 indicators.Validation.Rsquared = infoNet.ValidationHistory.RSquared(bestValIdx);
 indicators.Validation.RMSE = infoNet.ValidationHistory.RMSE(bestValIdx);
 indicators.Validation.MSE = infoNet.ValidationHistory.MSE(bestValIdx);
-indicators.Validation.MAPE = infoNet.ValidationHistory.MAPE(bestValIdx) * 100;
+indicators.Validation.MAPE = infoNet.ValidationHistory.MAPE(bestValIdx); % già in %
 indicators.Validation.MAE = infoNet.ValidationHistory.MAE(bestValIdx);
 indicators.Validation.ValLoss = infoNet.ValidationHistory.Loss(bestValIdx);
 
