@@ -7,6 +7,7 @@ end
 
 
 %% Load zone data based on ID
+% Dynamically select the correct MAT file and variable name based on the requested zone ID.
 switch zoneId
     case 8
         zoneFullName = "Zone_1016_Anagnina";
@@ -26,11 +27,14 @@ switch zoneId
         error("Zone ID not valid or not handled. Supported values: 8, 9, 10, 11.");
 end
 
-%% Load weather and holidays data
+%% Load weather and holiday data
+% Load exogenous variables which are shared across all zones
 meteoData = load(fullfile(projectRoot, "Gabriele Datas", "metero_year_hh.mat"), "meteo_year_hh");
 holidaysData = load(fullfile(projectRoot, "Gabriele Datas", "holidays.mat"), "vacanze");
 
 %% Final dataset creation
+% Merge the zone-specific target data with the overarching weather and holiday datasets.
+% The meteorological table acts as the base table to which we append new columns.
 dataOut = meteoData.meteo_year_hh;
 dataOut.holiday_indicator = holidaysData.vacanze;
 dataOut.AAC_energy = zoneData.AAC_energy{:, zoneFullName};

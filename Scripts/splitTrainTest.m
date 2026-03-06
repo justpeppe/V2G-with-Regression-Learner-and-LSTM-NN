@@ -13,12 +13,17 @@ if ~isdatetime(inputTable.time_vector)
     error("table.time_vector must be a datetime array.");
 end
 
+% Extract just the date part (ignoring the time) for accurate day-level grouping
 tempDays = dateshift(inputTable.time_vector, "start", "day");
 testDays = dateshift(testDays, "start", "day");
 
+% Find which rows in the main table belong to the designated test days
 idxTest = ismember(tempDays, testDays);
 
+% Split the dataset:
+% Training set gets everything that is NOT a test day
 training = inputTable(~idxTest, :);
+% Test set gets only the specific assigned test days
 test = inputTable(idxTest, :);
 
 fprintf("Created Training and Test tables for Regression Learner.\n");

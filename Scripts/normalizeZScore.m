@@ -16,6 +16,7 @@ if isTableInput
     end
 end
 
+% Pre-allocate output structures
 normParams = struct();
 if isTableInput
     trainingNorm = table();
@@ -26,7 +27,9 @@ else
     testNorm = zeros(size(testSet, 1), numCols);
 end
 
+% Iterate through each column designated for normalization
 for i = 1:numel(columnsToNormalize)
+    % Extract the column data handling both tables and numeric matrices
     if isTableInput
         colName = columnsToNormalize{i};
         vTrain = trainingSet.(colName);
@@ -37,27 +40,37 @@ for i = 1:numel(columnsToNormalize)
         vTest = testSet(:, colIdx);
     end
 
+    % Calculate normalization parameters (mu, sigma) *ONLY* on the training set.
+    % Applying these same parameters to the test set ensures no data leakage occurs.
     if isdatetime(vTrain)
         mu = mean(vTrain, "omitnat");
         sg = std(vTrain, 0, "omitnat");
+
+        % Safeguard against zero standard deviation for datetimes
         sgIsZero = (seconds(sg) == 0) | isnan(seconds(sg));
         if sgIsZero
             sg = seconds(1);
         end
         zTrain = (vTrain - mu) ./ sg;
         zTest = (vTest - mu) ./ sg;
+
     elseif isduration(vTrain)
         mu = mean(vTrain, "omitnan");
         sg = std(vTrain, 0, "omitnan");
+
+        % Safeguard against zero standard deviation for durations
         sgIsZero = (seconds(sg) == 0) | isnan(seconds(sg));
         if sgIsZero
             sg = seconds(1);
         end
         zTrain = (vTrain - mu) ./ sg;
         zTest = (vTest - mu) ./ sg;
+
     else
         mu = mean(vTrain, "omitnan");
         sg = std(vTrain, 0, "omitnan");
+
+        % Safeguard against zero standard deviation for normal numerics
         if isnan(sg) || sg == 0
             sg = 1;
         end
@@ -65,9 +78,12 @@ for i = 1:numel(columnsToNormalize)
         zTest = (vTest - mu) ./ sg;
     end
 
+    % Store back the normalized data and the parameters used
     if isTableInput
         trainingNorm.(colName) = zTrain;
         testNorm.(colName) = zTest;
+
+        % Create safe struct field names for properties like "AAC_energy"
         safeField = matlab.lang.makeValidName(colName);
         normParams.(safeField).mean = mu;
         normParams.(safeField).std = sg;
