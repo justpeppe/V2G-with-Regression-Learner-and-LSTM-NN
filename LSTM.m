@@ -16,12 +16,17 @@
 %
 % WHAT DATA DOES IT USE?
 % The network is trained on multivariate time-series data at half-hourly
-% (30-minute) intervals. The primary predictors (features) are:
-%   1. AAC_energy: Historical energy consumption (autoregressive component).
+% (30-minute) intervals. The primary predictors (features) depend on the
+% 'useAutoregressive' toggle and can include:
+%   1. Autoregressive Data: AAC_energy (historical energy consumption) — OPTIONAL.
 %   2. Weather Data: precipprob (precipitation), temp (temperature), windspeed.
 %   3. Calendar Data: holiday_indicator (identifies non-working days).
 %   4. Cyclical Time: hour_sin, hour_cos, day_sin, day_cos (mathematical
 %      transformations that help the LSTM understand daily and weekly cycles).
+%
+% NAMING CONVENTION
+% Models are saved using standard-compliant lowerCamelCase naming strings
+% (<= 32 characters) containing the type and 'HHMM' time (e.g., lstmAutoReg1105).
 %
 % HOW DOES IT WORK? (PIPELINE)
 % 1. Data Loading: Loads zone energy data and merges it with weather/holidays.
@@ -57,13 +62,39 @@ datas = loadZoneData(root, zoneId);
 
 numLags = 48; % Retained only for potential config reference, no longer dictates sliding windows.
 useBayesianOptimization = false; % Set to true to automatically search for optimal hyperparameters
+useAutoregressive = true; % Set to true to include AAC_energy in predictors, false for exogenous only
 
 % Predictors: weather, holidays, time (sine/cosine for cyclicity)
-% and AAC_energy (consumption history).
-predictors = ["AAC_energy", "precipprob", "temp", "windspeed", "holiday_indicator", ...
+% optionally AAC_energy (consumption history) based on the flag above.
+exogenousPredictors = ["precipprob", "temp", "windspeed", "holiday_indicator", ...
     "hour_sin", "hour_cos", "day_sin", "day_cos"];
+
+if useAutoregressive
+    predictors = ["AAC_energy", exogenousPredictors];
+else
+    predictors = exogenousPredictors;
+end
+
 target = "AAC_energy";
 columnsToNormalize = unique([predictors, target], "stable");
+
+%% Automated Report Setup
+currentTimeOrario = char(string(datetime("now", "Format", "HHmm")));
+if useAutoregressive
+    netName = "lstmAutoReg" + currentTimeOrario;
+else
+    netName = "lstmExog" + currentTimeOrario;
+end
+
+currentDate = char(string(datetime("now", "Format", "yyyy_MM_dd")));
+reportDir = fullfile(root, "Sessioni", currentDate, "Report_" + netName);
+if ~exist(reportDir, "dir")
+    mkdir(reportDir);
+end
+if ~exist(fullfile(reportDir, "fig"), "dir")
+    mkdir(fullfile(reportDir, "fig"));
+end
+diary(fullfile(reportDir, "Analysis_Log.txt"));
 
 % Automatically select representative validation and test day-pairs.
 % The function identifies non-consecutive data clusters and extracts typical
@@ -217,6 +248,16 @@ options = trainingOptions("adam", ...
 
 [net, info] = trainnet(xTrain, yTrain, layers, "mse", options);
 
+% Intercept the Training Progress figure (which has a dynamic Name with timestamps)
+allFigs = findall(groot, 'Type', 'Figure');
+for i = 1:numel(allFigs)
+    if contains(allFigs(i).Name, "Training Progress", "IgnoreCase", true)
+        exportgraphics(allFigs(i), fullfile(reportDir, "Training_Progress.png"), Resolution=300);
+        savefig(allFigs(i), fullfile(reportDir, "fig", "Training_Progress.fig"));
+        break;
+    end
+end
+
 %% Model Saving
 % The struct contains everything needed to reproduce and evaluate the network:
 %   - net:         the trained network (use for predictions with minibatchpredict)
@@ -226,8 +267,7 @@ options = trainingOptions("adam", ...
 %   - timeVector*: timestamps corresponding to each sequence (for plotting)
 %   - config:      network configuration parameters (hidden units, features, etc.)
 
-ts      = char(string(datetime("now", "Format", "yyyy_MM_dd_HH_mm_ss")));
-netName = "net_" + ts;
+%   - config:      network configuration parameters (hidden units, features, etc.)
 
 indicators = getBestIndicators(info);
 
@@ -303,6 +343,14 @@ trainingFig   = plotResults(trainingPrediction,   yTrainMat,      m.normParams, 
 validationFig = plotResults(validationPrediction, yValidationMat, m.normParams, target, timeVectorValidationMat);
 testFig       = plotResults(testPrediction,        yTestMat,       m.normParams, target, timeVectorTestMat);
 
+exportgraphics(trainingFig, fullfile(reportDir, "Seq_01_Training.png"), Resolution=300);
+exportgraphics(validationFig, fullfile(reportDir, "Seq_02_Validation.png"), Resolution=300);
+exportgraphics(testFig, fullfile(reportDir, "Seq_03_Test.png"), Resolution=300);
+
+savefig(trainingFig, fullfile(reportDir, "fig", "Seq_01_Training.fig"));
+savefig(validationFig, fullfile(reportDir, "fig", "Seq_02_Validation.fig"));
+savefig(testFig, fullfile(reportDir, "fig", "Seq_03_Test.fig"));
+
 %% Test Set Metrics Calculation
 % Compute RMSE, R^2, MAPE, MAE, and MSE on the denormalized test predictions (in actual kWh).
 models.(netName).indicators.Test = computeMetrics(testPrediction, yTestMat, normParams, char(target));
@@ -366,13 +414,15 @@ yTrainReal      = yTrainMat      .* targetStd + targetMu;
 testPredReal       = testPrediction       .* targetStd + targetMu;
 validationPredReal = validationPrediction .* targetStd + targetMu;
 
-figure("Name", "Target Autocorrelation", "NumberTitle", "off");
+figACF_Target = figure("Name", "Target Autocorrelation", "NumberTitle", "off");
 autocorr(yTrainReal, NumLags=100);
 title("Autocorrelation of AAC\_energy (Training Set)", FontSize=13);
 xlabel("Lag (30-min time steps)");
 ylabel("Autocorrelation Coefficient");
 xline(48, "--r", "Lag 48 (24h)", LabelVerticalAlignment="bottom");
 grid on;
+exportgraphics(figACF_Target, fullfile(reportDir, "Analysis_01_Target_ACF.png"), Resolution=300);
+savefig(figACF_Target, fullfile(reportDir, "fig", "Analysis_01_Target_ACF.fig"));
 
 %% Analysis Section 2: Residual Analysis on Test Set
 % Residuals should ideally resemble "white noise" with no systematic patterns.
@@ -380,7 +430,7 @@ grid on;
 
 residuiTest = double(yTestReal - testPredReal);
 
-figure("Name", "Residual Analysis — Test Set", "NumberTitle", "off", ...
+figResid = figure("Name", "Residual Analysis — Test Set", "NumberTitle", "off", ...
     "Position", [100 100 1100 600]);
 tiledlayout(2, 2, TileSpacing="compact", Padding="compact");
 
@@ -420,12 +470,14 @@ grid(axQQ, "on");
 
 sgtitle(sprintf("Residual Analysis — Test Set (RMSE=%.2f kWh)", ind.Test.RMSE), ...
     FontSize=14, FontWeight="bold");
+exportgraphics(figResid, fullfile(reportDir, "Analysis_02_Residuals.png"), Resolution=300);
+savefig(figResid, fullfile(reportDir, "fig", "Analysis_02_Residuals.fig"));
 
 %% Analysis Section 3: Scatter Plot Real vs Predicted (Test Set)
 % Points should ideally align along the bisector y=x.
 % The dispersion around this line represents the magnitude of the average error.
 
-figure("Name", "Scatter Plot: Real vs Predicted — Test Set", "NumberTitle", "off", ...
+figScatter = figure("Name", "Scatter Plot: Real vs Predicted — Test Set", "NumberTitle", "off", ...
     "Position", [200 200 600 580]);
 
 scatter(yTestReal, testPredReal, 35, [0.15 0.45 0.85], "filled", ...
@@ -441,6 +493,8 @@ title(sprintf("Test Set — R² = %.4f  |  RMSE = %.2f kWh", ...
     ind.Test.RSquared, ind.Test.RMSE), FontSize=13);
 legend("Predictions", "y = x", Location="northwest");
 axis equal; axis tight; grid on;
+exportgraphics(figScatter, fullfile(reportDir, "Analysis_03_Scatter.png"), Resolution=300);
+savefig(figScatter, fullfile(reportDir, "fig", "Analysis_03_Scatter.fig"));
 
 %% Analysis Section 4: Error Breakdown by Hour
 % Identifies during which hours of the day the network makes the largest errors.
@@ -459,7 +513,7 @@ for h = 0:23
     end
 end
 
-figure("Name", "Hourly Error Breakdown", "NumberTitle", "off", ...
+figHourly = figure("Name", "Hourly Error Breakdown", "NumberTitle", "off", ...
     "Position", [300 200 900 420]);
 
 ore = 0:23;
@@ -477,6 +531,8 @@ xticks(0:23);
 xticklabels(string(0:23) + ":00");
 xtickangle(45);
 grid on; grid minor;
+exportgraphics(figHourly, fullfile(reportDir, "Analysis_04_HourlyError.png"), Resolution=300);
+savefig(figHourly, fullfile(reportDir, "fig", "Analysis_04_HourlyError.fig"));
 
 % Highlight the hour with the highest error
 [~, oraMax] = max(errorePerOra);
@@ -533,6 +589,8 @@ fprintf("%s\n", repmat('-', 1, 52));
 fprintf("%-15s  %8.4f  %12.2f  %12.2f\n", "LSTM", ind.Test.RSquared, ind.Test.RMSE, ind.Test.MAE);
 fprintf("%-15s  %8.4f  %12.2f  %12.2f\n", "Persistence", r2Pers, rmsePers, maePers);
 fprintf("%s\n", repmat('-', 1, 52));
+
+diary off;
 
 %% Local Functions
 

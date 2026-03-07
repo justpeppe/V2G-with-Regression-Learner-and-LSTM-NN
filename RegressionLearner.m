@@ -15,11 +15,16 @@
 % used for direct comparison against the LSTM baseline.
 %
 % WHAT DATA DOES IT USE?
-% Identical pipeline to LSTM.m (same zone, same predictors, same split):
-%   1. AAC_energy: Historical energy consumption (autoregressive).
-%   2. Weather: precipprob, temp, windspeed.
-%   3. Calendar: holiday_indicator.
+% Identical pipeline to LSTM.m (same zone, configurable predictors, same split).
+% The feature set can be dynamically configured via the 'useAutoregressive' flag:
+%   1. Autoregressive Data: AAC_energy (historical energy consumption) — OPTIONAL.
+%   2. Weather Data: precipprob, temp, windspeed.
+%   3. Calendar Data: holiday_indicator.
 %   4. Cyclical Time: hour_sin, hour_cos, day_sin, day_cos.
+%
+% NAMING CONVENTION
+% Models are saved using standard-compliant lowerCamelCase naming strings
+% (<= 32 characters) containing the type and 'HHMM' time (e.g., regTreeExog1105).
 %
 % HOW DOES IT WORK? (PIPELINE)
 % 1. Data Loading: Same as LSTM.m (loadZoneData, selectRepresentativeDays).
@@ -53,6 +58,7 @@ datas = loadZoneData(root, zoneId);
 %% Constants
 
 numLags  = 48;   % Context window: 48 × 30-min = 24 hours (matches LSTM.m)
+useAutoregressive = true; % Set to true to include AAC_energy in predictors, false for exogenous only
 
 % Model type selector — choose one of:
 %   "ensemble"  → Gradient Boosted Trees (fitrensemble, 'LSBoost')
@@ -62,15 +68,44 @@ numLags  = 48;   % Context window: 48 × 30-min = 24 hours (matches LSTM.m)
 %   "linear"    → Regularised Linear (fitrlinear, Lasso)
 modelType = "ensemble";
 
-% Approach B — Exogenous-only predictors:
-% AAC_energy is removed from the feature set entirely. The model must predict
-% y(t) purely from weather (precipprob, temp, windspeed, holiday) and
-% cyclical time (hour_sin/cos, day_sin/cos). No autoregressive shortcut possible.
+% Exogenous predictors: weather + time
 exogenousPredictors = ["precipprob", "temp", "windspeed", "holiday_indicator", ...
     "hour_sin", "hour_cos", "day_sin", "day_cos"];
-predictors = exogenousPredictors;          % 8 features, no AAC_energy
+
+if useAutoregressive
+    predictors = ["AAC_energy", exogenousPredictors];
+else
+    predictors = exogenousPredictors;
+end
+
 target     = "AAC_energy";
-columnsToNormalize = unique([exogenousPredictors, target], "stable");
+columnsToNormalize = unique([predictors, target], "stable");
+
+%% Automated Report Setup
+currentTimeOrario  = char(string(datetime("now", "Format", "HHmm")));
+if modelType == "svm"
+    modelNameCamel = "Svm";
+elseif modelType == "gpr"
+    modelNameCamel = "Gpr";
+else
+    modelNameCamel = upper(extractBefore(modelType, 2)) + lower(extractAfter(modelType, 1));
+end
+
+if useAutoregressive
+    netName = "reg" + modelNameCamel + "AutoReg" + currentTimeOrario;
+else
+    netName = "reg" + modelNameCamel + "Exog" + currentTimeOrario;
+end
+
+currentDate = char(string(datetime("now", "Format", "yyyy_MM_dd")));
+reportDir = fullfile(root, "Sessioni", currentDate, "Report_" + netName);
+if ~exist(reportDir, "dir")
+    mkdir(reportDir);
+end
+if ~exist(fullfile(reportDir, "fig"), "dir")
+    mkdir(fullfile(reportDir, "fig"));
+end
+diary(fullfile(reportDir, "Analysis_Log.txt"));
 
 % Select representative validation and test days (same function as LSTM.m)
 [validationDays, testDays] = selectRepresentativeDays(datas);
@@ -190,9 +225,6 @@ indTest  = computeMetrics(yTestPred,  yTest,  normParams, char(target));
 
 %% Model Saving
 
-ts      = char(string(datetime("now", "Format", "yyyy_MM_dd_HH_mm_ss")));
-netName = "reg_" + modelType + "_exog_" + ts;  % '_exog': only weather+time features
-
 indicators = struct("Training", indTrain, "Validation", indVal, "Test", indTest);
 
 regStruct = struct( ...
@@ -267,13 +299,30 @@ trainPredReal  = yTrainPred .* targetStd + targetMu;
 valPredReal    = yValPred   .* targetStd + targetMu;
 testPredReal   = yTestPred  .* targetStd + targetMu;
 
+%% Target Autocorrelation
+% The autocorrelation of AAC_energy justifies the choice of numLags=48:
+% a significant coefficient at lag 48 indicates that the consumption
+% 24 hours ago is highly predictive of the current value.
+
+figACF_Target = figure("Name", "Target Autocorrelation", "NumberTitle", "off");
+autocorr(yTrainReal, NumLags=100);
+title("Autocorrelation of AAC\_energy (Training Set)", FontSize=13);
+xlabel("Lag (30-min time steps)");
+ylabel("Autocorrelation Coefficient");
+xline(48, "--r", "Lag 48 (24h)", LabelVerticalAlignment="bottom");
+grid on;
+exportgraphics(figACF_Target, fullfile(reportDir, "Analysis_01_Target_ACF.png"), Resolution=300);
+savefig(figACF_Target, fullfile(reportDir, "fig", "Analysis_01_Target_ACF.fig"));
+
 % ── Time-series comparison: Real vs Predicted (Test Set, denormalized) ──
 % Uses plotRegressionResults to draw day-separated lines with date labels on X.
-plotRegressionResults(yTestPred, yTest, normParams, char(target), timeVectorTest);
+figTimeSeries = plotRegressionResults(yTestPred, yTest, normParams, char(target), timeVectorTest);
 title(sprintf("%s — Test Set: Real vs Predicted (denormalized kWh)", modelType), FontSize=13);
+exportgraphics(figTimeSeries, fullfile(reportDir, "Analysis_01_TimeSeries.png"), Resolution=300);
+savefig(figTimeSeries, fullfile(reportDir, "fig", "Analysis_01_TimeSeries.fig"));
 
 % ── Scatter: Real vs Predicted (Test Set) ────────────────────────────────
-figure("Name", "Scatter Plot: Real vs Predicted — Test Set", "NumberTitle", "off", ...
+figScatter = figure("Name", "Scatter Plot: Real vs Predicted — Test Set", "NumberTitle", "off", ...
     "Position", [200 200 600 580]);
 
 scatter(yTestReal, testPredReal, 35, [0.15 0.45 0.85], "filled", ...
@@ -290,11 +339,14 @@ title(sprintf("Test Set — R² = %.4f  |  RMSE = %.2f kWh", ...
 legend("Predictions", "y = x", Location="northwest");
 axis equal; axis tight; grid on;
 
+exportgraphics(figScatter, fullfile(reportDir, "Analysis_02_Scatter.png"), Resolution=300);
+savefig(figScatter, fullfile(reportDir, "fig", "Analysis_02_Scatter.fig"));
+
 %% Residual Analysis (Test Set)
 
 residuiTest = yTestReal - testPredReal;
 
-figure("Name", "Residual Analysis — Test Set", "NumberTitle", "off", ...
+figResid = figure("Name", "Residual Analysis — Test Set", "NumberTitle", "off", ...
     "Position", [100 100 1100 600]);
 tiledlayout(2, 2, TileSpacing="compact", Padding="compact");
 
@@ -330,6 +382,9 @@ grid(axQQ, "on");
 sgtitle(sprintf("Residual Analysis — %s | Test Set (RMSE=%.2f kWh)", ...
     modelType, ind.Test.RMSE), FontSize=14, FontWeight="bold");
 
+exportgraphics(figResid, fullfile(reportDir, "Analysis_03_Residuals.png"), Resolution=300);
+savefig(figResid, fullfile(reportDir, "fig", "Analysis_03_Residuals.fig"));
+
 %% Hourly Error Breakdown (Test Set)
 
 orarioTest      = hour(timeVectorTest);
@@ -345,7 +400,7 @@ for h = 0:23
     end
 end
 
-figure("Name", "Hourly Error Breakdown", "NumberTitle", "off", ...
+figHourly = figure("Name", "Hourly Error Breakdown", "NumberTitle", "off", ...
     "Position", [300 200 900 420]);
 
 ore = 0:23;
@@ -363,11 +418,44 @@ xticklabels(string(0:23) + ":00");
 xtickangle(45);
 grid on; grid minor;
 
+exportgraphics(figHourly, fullfile(reportDir, "Analysis_04_HourlyError.png"), Resolution=300);
+savefig(figHourly, fullfile(reportDir, "fig", "Analysis_04_HourlyError.fig"));
+
 [~, oraMax] = max(errorePerOra);
 fprintf("\nHour with maximum average error: %02d:00 (MAE = %.2f kWh)\n", ...
     oraMax - 1, errorePerOra(oraMax));
 fprintf("Hour with minimum average error: %02d:00 (MAE = %.2f kWh)\n\n", ...
     find(errorePerOra == min(errorePerOra), 1) - 1, min(errorePerOra));
+
+%% Outlier Analysis — Investigation of Samples with Highest Error
+% Identifies the timestamps where the network made the largest errors and
+% displays the corresponding raw data (weather + real consumption) to
+% investigate the root cause.
+
+nTopOutliers = 10;  % Number of samples to investigate
+erroreAssolutoTest = abs(residuiTest);
+[~, idxOrd] = sort(erroreAssolutoTest, "descend");
+idxWorst = idxOrd(1:min(nTopOutliers, numel(idxOrd)));
+
+fprintf("\n=== Top %d Outliers — Highest Absolute Error Samples ===\n", nTopOutliers);
+fprintf("%-22s  %10s  %10s  %10s  %8s  %8s  %10s\n", ...
+    "Timestamp", "Real(kWh)", "Pred(kWh)", "Err(kWh)", "Temp(C)", "Wind", "PrecipPr");
+
+% Find corresponding rows in the raw data for each timestamp
+for k = 1:numel(idxWorst)
+    ts  = timeVectorTest(idxWorst(k));
+    righe = (datas.time_vector == ts);
+    if any(righe)
+        r = find(righe, 1);
+        fprintf("%-22s  %10.2f  %10.2f  %10.2f  %8.1f  %8.1f  %10.1f\n", ...
+            string(ts, "yyyy-MM-dd HH:mm"), ...
+            double(yTestReal(idxWorst(k))), ...
+            double(testPredReal(idxWorst(k))), ...
+            double(residuiTest(idxWorst(k))), ...
+            datas.temp(r), datas.windspeed(r), datas.precipprob(r));
+    end
+end
+fprintf("%s\n\n", repmat('-', 1, 86));
 
 %% Persistence Baseline (y(t) = y(t-1))
 
@@ -386,3 +474,5 @@ fprintf("%s\n", repmat('-', 1, 58));
 fprintf("%-20s  %8.4f  %12.2f  %12.2f\n", modelType, ind.Test.RSquared, ind.Test.RMSE, ind.Test.MAE);
 fprintf("%-20s  %8.4f  %12.2f  %12.2f\n", "Persistence",  r2Pers, rmsePers, maePers);
 fprintf("%s\n", repmat('-', 1, 58));
+
+diary off;
