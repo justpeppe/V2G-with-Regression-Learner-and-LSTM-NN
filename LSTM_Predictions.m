@@ -25,17 +25,28 @@ testMode = 'all';
 %    Format: datetime array, e.g., [datetime(2023,02,15), datetime(2023,02,16)]
 customDates = [];
 
+% 4. Target Session: Specifies the session folder (e.g., '2026_03_07') or 'latest'
+targetSession = '2026_03_07';
+
+% 5. Target Model: Specifies the model name (e.g., 'lstmExog1125') or 'latest'
+targetModel = 'lstmAutoReg1127';
+
 %% Setup
-clearvars -except targetZones testMode customDates;
+clearvars -except targetZones testMode customDates targetSession targetModel;
 root = fileparts(mfilename('fullpath'));
 addpath(root + "\Scripts");
 
-%% Load Most Recent Model
+%% Load Target Model
 sessioniDir = fullfile(root, "Sessioni");
-dateFiles   = dir(fullfile(sessioniDir, "**", "Models_*.mat"));
+
+if strcmpi(targetSession, 'latest')
+    dateFiles = dir(fullfile(sessioniDir, "**", "Models_*.mat"));
+else
+    dateFiles = dir(fullfile(sessioniDir, targetSession, "Models_*.mat"));
+end
 
 if isempty(dateFiles)
-    error("No saved model in Sessioni/. Run LSTM.m first.");
+    error("No saved model found matching the target session criteria.");
 end
 [~, idx] = sort([dateFiles.datenum], "descend");
 latestFile = fullfile(dateFiles(idx(1)).folder, dateFiles(idx(1)).name);
@@ -49,10 +60,18 @@ isLstmModel = startsWith(allNames, "lstm", "IgnoreCase", true);
 lstmNames = allNames(isLstmModel);
 
 if isempty(lstmNames)
-    error("No LSTM models found in the latest file: %s", latestFile);
+    error("No LSTM models found in the file: %s", latestFile);
 end
 
-netName = lstmNames{end};
+if strcmpi(targetModel, 'latest')
+    netName = lstmNames{end};
+else
+    if ~ismember(targetModel, lstmNames)
+        error("Model '%s' not found. Available LSTM models: %s", targetModel, strjoin(lstmNames, ", "));
+    end
+    netName = targetModel;
+end
+
 m       = mdls.(netName);
 cfg     = m.config;
 

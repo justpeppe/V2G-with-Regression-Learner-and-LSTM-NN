@@ -22,17 +22,28 @@ testMode = 'all';
 %    Format: datetime array, e.g., [datetime(2023,02,15), datetime(2023,02,16)]
 customDates = [];
 
+% 4. Target Session: Specifies the session folder (e.g., '2026_03_07') or 'latest'
+targetSession = '2026_03_07';
+
+% 5. Target Model: Specifies the model name (e.g., 'regBoost1125') or 'latest'
+targetModel = 'latest'; % Metti 'latest' o il nome del modello, es. 'regBoost1125'
+
 %% Setup
-clearvars -except targetZones testMode customDates;
+clearvars -except targetZones testMode customDates targetSession targetModel;
 root = fileparts(mfilename('fullpath'));
 addpath(root + "\Scripts");
 
-%% Load Most Recent Regression Model
+%% Load Target Regression Model
 sessioniDir = fullfile(root, "Sessioni");
-dateFiles   = dir(fullfile(sessioniDir, "**", "Models_*.mat"));
+
+if strcmpi(targetSession, 'latest')
+    dateFiles = dir(fullfile(sessioniDir, "**", "Models_*.mat"));
+else
+    dateFiles = dir(fullfile(sessioniDir, targetSession, "Models_*.mat"));
+end
 
 if isempty(dateFiles)
-    error("No saved models found in Sessioni/. Run RegressionLearner.m first.");
+    error("No saved models found matching the target session criteria.");
 end
 [~, idx] = sort([dateFiles.datenum], "descend");
 latestFile = fullfile(dateFiles(idx(1)).folder, dateFiles(idx(1)).name);
@@ -46,10 +57,18 @@ isRegModel = startsWith(allNames, "reg", "IgnoreCase", true);
 regNames = allNames(isRegModel);
 
 if isempty(regNames)
-    error("No Regression Learner models found in the latest file: %s", latestFile);
+    error("No Regression Learner models found in the file: %s", latestFile);
 end
 
-netName = regNames{end};
+if strcmpi(targetModel, 'latest')
+    netName = regNames{end};
+else
+    if ~ismember(targetModel, regNames)
+        error("Model '%s' not found. Available Regression models: %s", targetModel, strjoin(regNames, ", "));
+    end
+    netName = targetModel;
+end
+
 m       = mdls.(netName);
 cfg     = m.config;
 
