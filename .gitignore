@@ -6,7 +6,11 @@
 
 # MATLAB
 *.asv
+*.m~
 *.autosave
+*.slxc
 slprj/
 codegen/
-Sessioni/
+*.mex*
+*.mlappinstall
+*.mltbx
