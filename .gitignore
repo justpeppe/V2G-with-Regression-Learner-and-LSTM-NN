@@ -14,3 +14,7 @@ codegen/
 *.mex*
 *.mlappinstall
 *.mltbx
+
+# Mine 
+exportZoneDataToCsv.m
+docs/
