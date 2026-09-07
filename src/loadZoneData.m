@@ -36,10 +36,27 @@ holidaysData = load(fullfile(dataFolder, "Gabriele Datas", "holidays.mat"), "vac
 % Merge the zone-specific target data with the overarching weather and holiday datasets.
 % The meteorological table acts as the base table to which we append new columns.
 data = meteoData.meteo_year_hh;
-data.holiday_indicator = holidaysData.vacanze;
-data.AAC_energy = zoneData.AAC_energy{:, zoneFullName};
-data.time_vector = zoneData.time_vector(:);
 
-fprintf("Data for zone ""%s"" loaded correctly.\n", zoneFullName);
+% Columns are appended by position. A zone file with the same number of rows but a
+% different time base would misalign every row without raising an error, so compare the
+% two time axes here, while they are still separate.
+if ~isequal(data.datetime, zoneData.time_vector(:))
+    error("loadZoneData:timeMismatch", ...
+        "Zone %d time base differs from the weather data; the positional merge would be wrong.", zoneId);
+end
+
+% Not a 0/1 flag despite the old name: an exponential ramp of proximity to the next
+% non-working day. Working days peak at 0.9583, non-working days reach 1 within
+% floating point error, so classify with a > 0.99 threshold and never with == 1.
+data.holiday_proximity = holidaysData.vacanze;
+data.AAC_energy = zoneData.AAC_energy{:, zoneFullName};
+
+% Single time column, in ISO 8601: it sorts chronologically even when read as plain text
+% and needs no locale, unlike dd-MMM-yyyy. The zone time_vector is dropped because the
+% check above proved it identical.
+data.datetime.Format = 'yyyy-MM-dd''T''HH:mm:ss';
+
+fprintf("Data for zone ""%s"" loaded correctly (%d rows x %d columns).\n", ...
+    zoneFullName, height(data), width(data));
 
 end
