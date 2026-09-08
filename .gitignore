@@ -17,4 +17,11 @@ codegen/
 
 # Mine 
 exportZoneDataToCsv.m
+
+# AI
+.agents/
 docs/
+.scratch/
+AGENTS.md
+CONTEXT.md
+skills-lock.json
