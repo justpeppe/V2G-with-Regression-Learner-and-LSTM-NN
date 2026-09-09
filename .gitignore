@@ -26,5 +26,8 @@ AGENTS.md
 CONTEXT.md
 skills-lock.json
 
+# Exports
+exports/
+
 #progress
 Thumbs.db
