@@ -31,3 +31,6 @@ exports/
 
 #progress
 Thumbs.db
+
+# Temporary files
+*.tmp
