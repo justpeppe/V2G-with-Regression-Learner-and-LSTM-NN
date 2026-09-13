@@ -9,7 +9,7 @@ arguments
     targetName string = "AAC_energy"
 end
 
-%% 1. Check predictor and target variables
+%% Check predictor and target variables
 if isempty(predictorNames)
     isNumeric = varfun(@(col) isa(col, 'double'), data, 'OutputFormat', 'uniform');
     predictorNames = string(data.Properties.VariableNames(isNumeric));
@@ -20,7 +20,7 @@ end
 targetCol = char(targetName);
 featureCols = cellstr(predictorNames);
 
-%% 2. Group days into seasonal clusters
+%% Group days into seasonal clusters
 data.day = dateshift(data.datetime, "start", "day");
 allDays = unique(data.day);
 dayCounts = groupcounts(data.day);
@@ -32,7 +32,7 @@ clusterId = ones(size(completeDays));
 clusterId(2:end) = clusterId(2:end) + cumsum(dayGaps > 1);
 numClusters = max(clusterId);
 
-%% 3. Assign train, validation, and test labels
+%% Assign train, validation, and test labels
 % The last 4 days of each cluster are held out:
 % Odd clusters tail -> validation, Even clusters tail -> test
 daySplit = strings(size(completeDays));
@@ -57,7 +57,8 @@ for i = 1:numel(completeDays)
     data.splitLabel(mask) = daySplit(i);
 end
 
-%% 4. Compute normalization parameters (on training rows only)
+%% Compute normalization parameters
+% Normalization is computed on training rows only
 isTrain = data.splitLabel == "train";
 XTrainRaw = data{isTrain, featureCols};
 TTrainRaw = data.(targetCol)(isTrain);
@@ -78,7 +79,8 @@ end
 XNorm = (data{:, featureCols} - normParams.mu) ./ normParams.sigma;
 TNorm = (data.(targetCol) - normParams.muTarget) ./ normParams.sigmaTarget;
 
-%% 5. Extract sliding windows (Sequence-to-Scalar)
+%% Extract sliding windows
+% Sequence-to-scalar window extraction
 trainData = struct('X', {{}}, 'T', zeros(0,1), 'timestamps', datetime.empty(0,1));
 valData   = struct('X', {{}}, 'T', zeros(0,1), 'timestamps', datetime.empty(0,1));
 testData  = struct('X', {{}}, 'T', zeros(0,1), 'timestamps', datetime.empty(0,1));
@@ -107,7 +109,7 @@ for c = 1:numClusters
     end
 end
 
-%% 6. Print simple summary
+%% Print summary
 fprintf("Split completed: %d train, %d val, %d test samples.\n", ...
     numel(trainData.T), numel(valData.T), numel(testData.T));
 
